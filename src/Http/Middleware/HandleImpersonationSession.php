@@ -40,7 +40,10 @@ final class HandleImpersonationSession
             return $this->redirect($request, 'expired');
         }
 
-        if ($request->user() === null) {
+        // Resolve the target on the impersonation guard, not the request's
+        // default guard — impersonation may run on a non-default guard, and
+        // $request->user() (default guard) would false-positive a teardown.
+        if ($this->impersonate->impersonatedUser() === null) {
             $this->impersonate->leave();
 
             return $this->redirect($request, 'target-missing');

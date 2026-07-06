@@ -203,3 +203,71 @@ it('registers the session middleware alias', function (): void {
     expect(app('router')->getMiddleware())
         ->toHaveKey('impersonate.session', HandleImpersonationSession::class);
 });
+
+it('fails closed when the impersonator is not authenticated on any guard', function (): void {
+    $admin = $this->makeUser();
+    $target = $this->makeUser();
+
+    // $admin is never logged in — currentGuard() can't identify an origin.
+    $manager = app(Impersonate::class);
+
+    expect($manager->take($admin, $target))->toBeFalse()
+        ->and($manager->isImpersonating())->toBeFalse();
+});
+
+it('does not resolve remember-me cookies while identifying the origin guard', function (): void {
+    // A guard with no in-memory user must be skipped, not resolved (which
+    // would fire a Login event). Only the acting guard has a resolved user.
+    $admin = $this->makeUser();
+    $target = $this->makeUser();
+    Auth::guard('web')->login($admin);
+
+    Event::fake([Login::class]);
+
+    expect(app(Impersonate::class)->take($admin, $target))->toBeTrue();
+
+    Event::assertNotDispatched(Login::class);
+});
+
+it('stores the impersonator model class and rejects a recycled id on leave', function (): void {
+    $admin = $this->makeUser();
+    $target = $this->makeUser();
+    Auth::guard('web')->login($admin);
+
+    $manager = app(Impersonate::class);
+    $manager->take($admin, $target);
+
+    // Simulate id recycling: the stored class no longer matches the row.
+    session()->put('impersonate.impersonator_type', 'App\\SomeOtherModel');
+
+    expect($manager->getImpersonator())->toBeNull();
+
+    // leave() then treats it as orphaned rather than logging in the wrong user.
+    Event::fake([OrphanedImpersonationLeft::class]);
+    expect($manager->leave())->toBeTrue()
+        ->and($manager->isImpersonating())->toBeFalse();
+    Event::assertDispatched(OrphanedImpersonationLeft::class);
+});
+
+it('exposes the impersonated user via the impersonation guard, not the default', function (): void {
+    $admin = $this->makeUser();
+    $target = $this->makeUser();
+    Auth::guard('admin')->login($admin);
+
+    $manager = app(Impersonate::class);
+    $manager->take($admin, $target, 'web');
+
+    // Impersonation lives on web while the admin guard (where the operator
+    // was) is logged out, yet impersonatedUser() still resolves the target.
+    expect($manager->impersonatedUser()?->getAuthIdentifier())->toBe($target->id)
+        ->and($manager->impersonatingOnGuard())->toBe('web')
+        ->and($manager->startedAt())->toBeInt();
+});
+
+it('returns null accessors when not impersonating', function (): void {
+    $manager = app(Impersonate::class);
+
+    expect($manager->impersonatedUser())->toBeNull()
+        ->and($manager->impersonatingOnGuard())->toBeNull()
+        ->and($manager->startedAt())->toBeNull();
+});

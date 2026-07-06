@@ -32,8 +32,17 @@ return [
     'session_key' => 'impersonate',
     'default_impersonator_guard' => config('auth.defaults.guard'),
     'leave_redirect_to' => '/',
+
+    // Minutes before HandleImpersonationSession auto-ends an impersonation.
+    // Zero (or a non-numeric value) disables expiry.
+    'ttl' => (int) env('IMPERSONATION_TTL_MINUTES', 30),
 ];
 ```
+
+> **Session guards only.** This is a session-driven mechanism: both the
+> impersonator's guard and the target guard must be session-based. `take()`
+> returns `false` (a no-op) for token/request guards such as Sanctum's `api`
+> guard rather than silently pretending to succeed.
 
 ## User model
 
@@ -150,21 +159,33 @@ Route::middleware(['auth', 'impersonate.protect'])->group(function () {
 
 ## Events
 
-Two events are dispatched, each carrying the impersonator and the target:
+Three events are dispatched. Every event carries an `occurredAt`
+(`DateTimeInterface`) stamped when the action happened — pass it to your audit
+log so a queued listener records the true time, not the job-processing time.
+
+- `TakenImpersonation` — `impersonator`, `target`, `occurredAt`.
+- `LeftImpersonation` — `impersonator`, `target`, `occurredAt`.
+- `OrphanedImpersonationLeft` — dispatched instead of `LeftImpersonation` when
+  the impersonator no longer exists (deleted mid-session), so the leave stays
+  auditable. Carries `impersonatorId` (int|string), a nullable `target`, and
+  `occurredAt` — there is no impersonator model to hand you.
 
 ```php
+use Thecyrilcril\Impersonate\Events\OrphanedImpersonationLeft;
 use Thecyrilcril\Impersonate\Events\TakenImpersonation;
-use Thecyrilcril\Impersonate\Events\LeftImpersonation;
 
 Event::listen(TakenImpersonation::class, function (TakenImpersonation $event) {
     logger()->info('Impersonation started', [
         'impersonator' => $event->impersonator->getAuthIdentifier(),
         'target' => $event->target->getAuthIdentifier(),
+        'at' => $event->occurredAt,
     ]);
 });
 
-Event::listen(LeftImpersonation::class, function (LeftImpersonation $event) {
-    // ...
+Event::listen(OrphanedImpersonationLeft::class, function (OrphanedImpersonationLeft $event) {
+    logger()->warning('Impersonation left; impersonator was deleted', [
+        'impersonator_id' => $event->impersonatorId,
+    ]);
 });
 ```
 

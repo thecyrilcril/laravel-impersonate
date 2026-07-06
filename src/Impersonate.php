@@ -6,6 +6,7 @@ namespace Thecyrilcril\Impersonate;
 
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\Factory as AuthFactory;
+use Illuminate\Contracts\Auth\StatefulGuard;
 use Illuminate\Contracts\Config\Repository as Config;
 use Illuminate\Contracts\Container\Container;
 use Illuminate\Contracts\Events\Dispatcher;
@@ -40,13 +41,28 @@ final class Impersonate
         }
 
         $guard ??= $this->defaultGuard();
-        $originalGuard = $this->currentGuard($impersonator);
 
         if ($this->isSameUser($impersonator, $target)) {
             return false;
         }
 
+        // Fail closed: refuse the swap unless we can positively identify the
+        // guard the impersonator is authenticated on (never guess a default —
+        // guessing can restore the wrong provider's user on leave).
+        $originalGuard = $this->currentGuard($impersonator);
+
+        if ($originalGuard === null) {
+            return false;
+        }
+
+        // Both guards must be session-based; the swap is session state, so a
+        // token/request guard would silently no-op and strand the session.
+        if (! $this->isSessionGuard($originalGuard) || ! $this->isSessionGuard($guard)) {
+            return false;
+        }
+
         $this->session()->put($this->key('impersonator_id'), $impersonator->getAuthIdentifier());
+        $this->session()->put($this->key('impersonator_type'), $impersonator::class);
         $this->session()->put($this->key('impersonator_guard'), $originalGuard);
         $this->session()->put($this->key('guard'), $guard);
         $this->session()->put($this->key('started_at'), time());
@@ -104,6 +120,20 @@ final class Impersonate
         return $this->session()->has($this->key('impersonator_id'));
     }
 
+    /**
+     * The impersonated user resolved on the impersonation guard, or null when
+     * not impersonating or the target no longer resolves. Resolves against the
+     * stored impersonation guard — never the request's default guard.
+     */
+    public function impersonatedUser(): ?Authenticatable
+    {
+        if (! $this->isImpersonating()) {
+            return null;
+        }
+
+        return $this->auth->guard($this->impersonateGuard())->user();
+    }
+
     public function getImpersonatorId(): int|string|null
     {
         /** @var int|string|null $id */
@@ -121,8 +151,22 @@ final class Impersonate
         }
 
         $provider = $this->auth->guard($this->impersonatorGuard())->getProvider();
+        $impersonator = $provider->retrieveById($id);
 
-        return $provider->retrieveById($id);
+        if ($impersonator === null) {
+            return null;
+        }
+
+        // Guard against a recycled id resolving to a different account: the
+        // restored model must match the class captured at take-time.
+        /** @var string|null $type */
+        $type = $this->session()->get($this->key('impersonator_type'));
+
+        if ($type !== null && $impersonator::class !== $type) {
+            return null;
+        }
+
+        return $impersonator;
     }
 
     /**
@@ -255,19 +299,31 @@ final class Impersonate
     private function clear(): void
     {
         $this->session()->forget($this->key('impersonator_id'));
+        $this->session()->forget($this->key('impersonator_type'));
         $this->session()->forget($this->key('impersonator_guard'));
         $this->session()->forget($this->key('guard'));
         $this->session()->forget($this->key('started_at'));
     }
 
     /**
-     * Same human regardless of guard: identical identifier on the same
-     * Authenticatable class is self-impersonation even across guards.
+     * Same human: identical identifier on the same Authenticatable class is
+     * self-impersonation regardless of which guard resolves them.
      */
     private function isSameUser(Authenticatable $impersonator, Authenticatable $target): bool
     {
         return $impersonator::class === $target::class
             && $impersonator->getAuthIdentifier() === $target->getAuthIdentifier();
+    }
+
+    /**
+     * Whether the named guard is session-based (the only kind this
+     * session-driven mechanism can drive coherently).
+     */
+    private function isSessionGuard(string $guard): bool
+    {
+        // getName() is the session-store key accessor, present only on
+        // SessionGuard — token/request guards lack it.
+        return method_exists($this->auth->guard($guard), 'getName');
     }
 
     private function impersonatorGuard(): string
@@ -286,18 +342,35 @@ final class Impersonate
         return $guard ?? $this->defaultGuard();
     }
 
-    private function currentGuard(Authenticatable $impersonator): string
+    /**
+     * The guard the impersonator is already authenticated on, or null when it
+     * cannot be positively identified (caller must fail closed).
+     *
+     * Only inspects guards that ALREADY hold a resolved user in memory
+     * (hasUser()) — it never calls user()/check(), which would resolve
+     * remember-me recaller cookies and, as a side effect, log a user in and
+     * fire a Login event (defeating the quiet-swap guarantee).
+     */
+    private function currentGuard(Authenticatable $impersonator): ?string
     {
         foreach (array_keys((array) $this->config->get('auth.guards', [])) as $name) {
             $guard = $this->auth->guard($name);
+
+            if (! $guard instanceof StatefulGuard || ! $guard->hasUser()) {
+                continue;
+            }
+
             $user = $guard->user();
 
-            if ($user !== null && $user->getAuthIdentifier() === $impersonator->getAuthIdentifier()) {
+            if ($user !== null
+                && $user::class === $impersonator::class
+                && $user->getAuthIdentifier() === $impersonator->getAuthIdentifier()
+            ) {
                 return (string) $name;
             }
         }
 
-        return $this->defaultGuard();
+        return null;
     }
 
     private function defaultGuard(): string
