@@ -55,7 +55,7 @@
     "scripts": {
         "test": "vendor/bin/pest",
         "lint": "vendor/bin/pint",
-        "analyse": "vendor/bin/phpstan analyse --level=7 src"
+        "analyse": "vendor/bin/phpstan analyse"
     },
     "minimum-stability": "stable",
     "prefer-stable": true
