@@ -7,7 +7,6 @@ namespace Thecyrilcril\Impersonate;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\Factory as AuthFactory;
 use Illuminate\Contracts\Config\Repository as Config;
-use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Contracts\Session\Session;
 use Illuminate\Routing\Router;
 use Illuminate\Support\Facades\Blade;
@@ -23,14 +22,10 @@ final class ImpersonateServiceProvider extends ServiceProvider
         $this->app->singleton(Impersonate::class, static function ($app): Impersonate {
             /** @var AuthFactory $auth */
             $auth = $app->make(AuthFactory::class);
-            /** @var Session $session */
-            $session = $app->make('session.store');
-            /** @var Dispatcher $events */
-            $events = $app->make(Dispatcher::class);
             /** @var Config $config */
             $config = $app->make(Config::class);
 
-            return new Impersonate($auth, $session, $events, $config);
+            return new Impersonate($auth, $config, $app);
         });
 
         $this->app->alias(Impersonate::class, 'impersonate');
@@ -55,32 +50,56 @@ final class ImpersonateServiceProvider extends ServiceProvider
 
     private function registerBladeDirectives(): void
     {
-        Blade::if('impersonating', static function (?string $guard = null): bool {
-            $manager = app(Impersonate::class);
+        Blade::directive('impersonating', static fn (string $expression): string => "<?php if (\\Thecyrilcril\\Impersonate\\ImpersonateServiceProvider::isImpersonating({$expression})): ?>");
+        Blade::directive('endImpersonating', static fn (): string => '<?php endif; ?>');
 
-            if (! $manager->isImpersonating()) {
-                return false;
-            }
+        Blade::directive('canImpersonate', static fn (string $expression): string => "<?php if (\\Thecyrilcril\\Impersonate\\ImpersonateServiceProvider::canImpersonate({$expression})): ?>");
+        Blade::directive('endCanImpersonate', static fn (): string => '<?php endif; ?>');
 
-            if ($guard === null) {
-                return true;
-            }
+        Blade::directive('canBeImpersonated', static fn (string $expression): string => "<?php if (\\Thecyrilcril\\Impersonate\\ImpersonateServiceProvider::canBeImpersonated({$expression})): ?>");
+        Blade::directive('endCanBeImpersonated', static fn (): string => '<?php endif; ?>');
+    }
 
-            return app('session.store')->get('impersonate.guard') === $guard;
-        });
+    /**
+     * Backing check for the @impersonating directive.
+     */
+    public static function isImpersonating(?string $guard = null): bool
+    {
+        $manager = app(Impersonate::class);
 
-        Blade::if('canImpersonate', static function (?string $guard = null): bool {
-            $user = app(AuthFactory::class)->guard($guard)->user();
+        if (! $manager->isImpersonating()) {
+            return false;
+        }
 
-            return $user !== null
-                && method_exists($user, 'canImpersonate')
-                && $user->canImpersonate();
-        });
+        if ($guard === null) {
+            return true;
+        }
 
-        Blade::if('canBeImpersonated', static function (Authenticatable $user, ?string $guard = null): bool {
-            return method_exists($user, 'canBeImpersonated')
-                && $user->canBeImpersonated();
-        });
+        /** @var Session $session */
+        $session = app('session.store');
+
+        return $session->get('impersonate.guard') === $guard;
+    }
+
+    /**
+     * Backing check for the @canImpersonate directive.
+     */
+    public static function canImpersonate(?string $guard = null): bool
+    {
+        $user = app(AuthFactory::class)->guard($guard)->user();
+
+        return $user !== null
+            && method_exists($user, 'canImpersonate')
+            && $user->canImpersonate();
+    }
+
+    /**
+     * Backing check for the @canBeImpersonated directive.
+     */
+    public static function canBeImpersonated(Authenticatable $user, ?string $guard = null): bool
+    {
+        return method_exists($user, 'canBeImpersonated')
+            && $user->canBeImpersonated();
     }
 
     private function configPath(): string

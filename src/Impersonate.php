@@ -7,6 +7,7 @@ namespace Thecyrilcril\Impersonate;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\Factory as AuthFactory;
 use Illuminate\Contracts\Config\Repository as Config;
+use Illuminate\Contracts\Container\Container;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Contracts\Session\Session;
 use Thecyrilcril\Impersonate\Events\LeftImpersonation;
@@ -16,9 +17,8 @@ final class Impersonate
 {
     public function __construct(
         private readonly AuthFactory $auth,
-        private readonly Session $session,
-        private readonly Dispatcher $events,
         private readonly Config $config,
+        private readonly Container $container,
     ) {}
 
     /**
@@ -40,14 +40,14 @@ final class Impersonate
             return false;
         }
 
-        $this->session->put($this->key('impersonator_id'), $impersonator->getAuthIdentifier());
-        $this->session->put($this->key('impersonator_guard'), $originalGuard);
-        $this->session->put($this->key('guard'), $guard);
+        $this->session()->put($this->key('impersonator_id'), $impersonator->getAuthIdentifier());
+        $this->session()->put($this->key('impersonator_guard'), $originalGuard);
+        $this->session()->put($this->key('guard'), $guard);
 
-        $this->auth->guard($originalGuard)->logout();
+        $this->logoutWithoutCyclingToken($originalGuard);
         $this->auth->guard($guard)->login($target, false);
 
-        $this->events->dispatch(new TakenImpersonation($impersonator, $target));
+        $this->events()->dispatch(new TakenImpersonation($impersonator, $target));
 
         return true;
     }
@@ -69,7 +69,7 @@ final class Impersonate
         $target = $this->auth->guard($impersonateGuard)->user();
         $impersonator = $this->getImpersonator();
 
-        $this->auth->guard($impersonateGuard)->logout();
+        $this->logoutWithoutCyclingToken($impersonateGuard);
 
         if ($impersonator !== null) {
             $this->auth->guard($impersonatorGuard)->login($impersonator, false);
@@ -78,7 +78,7 @@ final class Impersonate
         $this->clear();
 
         if ($impersonator !== null && $target !== null) {
-            $this->events->dispatch(new LeftImpersonation($impersonator, $target));
+            $this->events()->dispatch(new LeftImpersonation($impersonator, $target));
         }
 
         return true;
@@ -86,13 +86,13 @@ final class Impersonate
 
     public function isImpersonating(): bool
     {
-        return $this->session->has($this->key('impersonator_id'));
+        return $this->session()->has($this->key('impersonator_id'));
     }
 
     public function getImpersonatorId(): int|string|null
     {
         /** @var int|string|null $id */
-        $id = $this->session->get($this->key('impersonator_id'));
+        $id = $this->session()->get($this->key('impersonator_id'));
 
         return $id;
     }
@@ -107,14 +107,50 @@ final class Impersonate
 
         $provider = $this->auth->guard($this->impersonatorGuard())->getProvider();
 
-        return $provider?->retrieveById($id);
+        return $provider->retrieveById($id);
+    }
+
+    /**
+     * Log out of the given guard without cycling the user's remember token.
+     *
+     * Impersonation must never mutate remember tokens, so we use
+     * logoutCurrentDevice() when available (it clears the session but leaves
+     * the token intact) and fall back to logout() for non-session guards.
+     */
+    private function logoutWithoutCyclingToken(string $guard): void
+    {
+        $driver = $this->auth->guard($guard);
+
+        if (method_exists($driver, 'logoutCurrentDevice')) {
+            $driver->logoutCurrentDevice();
+
+            return;
+        }
+
+        $driver->logout();
+    }
+
+    private function session(): Session
+    {
+        /** @var Session $session */
+        $session = $this->container->make('session.store');
+
+        return $session;
+    }
+
+    private function events(): Dispatcher
+    {
+        /** @var Dispatcher $events */
+        $events = $this->container->make(Dispatcher::class);
+
+        return $events;
     }
 
     private function clear(): void
     {
-        $this->session->forget($this->key('impersonator_id'));
-        $this->session->forget($this->key('impersonator_guard'));
-        $this->session->forget($this->key('guard'));
+        $this->session()->forget($this->key('impersonator_id'));
+        $this->session()->forget($this->key('impersonator_guard'));
+        $this->session()->forget($this->key('guard'));
     }
 
     private function isSameUser(Authenticatable $impersonator, string $impersonatorGuard, Authenticatable $target, string $targetGuard): bool
@@ -126,7 +162,7 @@ final class Impersonate
     private function impersonatorGuard(): string
     {
         /** @var string|null $guard */
-        $guard = $this->session->get($this->key('impersonator_guard'));
+        $guard = $this->session()->get($this->key('impersonator_guard'));
 
         return $guard ?? $this->defaultGuard();
     }
@@ -134,7 +170,7 @@ final class Impersonate
     private function impersonateGuard(): string
     {
         /** @var string|null $guard */
-        $guard = $this->session->get($this->key('guard'));
+        $guard = $this->session()->get($this->key('guard'));
 
         return $guard ?? $this->defaultGuard();
     }
