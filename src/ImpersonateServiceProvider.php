@@ -7,10 +7,10 @@ namespace Thecyrilcril\Impersonate;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\Factory as AuthFactory;
 use Illuminate\Contracts\Config\Repository as Config;
-use Illuminate\Contracts\Session\Session;
 use Illuminate\Routing\Router;
 use Illuminate\Support\Facades\Blade;
 use Illuminate\Support\ServiceProvider;
+use Thecyrilcril\Impersonate\Http\Middleware\HandleImpersonationSession;
 use Thecyrilcril\Impersonate\Http\Middleware\ProtectFromImpersonation;
 
 final class ImpersonateServiceProvider extends ServiceProvider
@@ -46,6 +46,7 @@ final class ImpersonateServiceProvider extends ServiceProvider
         /** @var Router $router */
         $router = $this->app->make(Router::class);
         $router->aliasMiddleware('impersonate.protect', ProtectFromImpersonation::class);
+        $router->aliasMiddleware('impersonate.session', HandleImpersonationSession::class);
     }
 
     private function registerBladeDirectives(): void
@@ -71,14 +72,7 @@ final class ImpersonateServiceProvider extends ServiceProvider
             return false;
         }
 
-        if ($guard === null) {
-            return true;
-        }
-
-        /** @var Session $session */
-        $session = app('session.store');
-
-        return $session->get('impersonate.guard') === $guard;
+        return $guard === null || $manager->impersonatingOnGuard() === $guard;
     }
 
     /**

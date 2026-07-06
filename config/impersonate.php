@@ -43,4 +43,17 @@ return [
 
     'leave_redirect_to' => '/',
 
+    /*
+    |--------------------------------------------------------------------------
+    | Impersonation TTL (minutes)
+    |--------------------------------------------------------------------------
+    |
+    | How long an impersonation session may live before the
+    | HandleImpersonationSession middleware ends it automatically. Zero (or
+    | null) disables expiry. Sessions started before TTL support never expire.
+    |
+    */
+
+    'ttl' => (int) env('IMPERSONATION_TTL_MINUTES', 30),
+
 ];

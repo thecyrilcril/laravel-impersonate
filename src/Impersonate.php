@@ -11,6 +11,7 @@ use Illuminate\Contracts\Container\Container;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Contracts\Session\Session;
 use Thecyrilcril\Impersonate\Events\LeftImpersonation;
+use Thecyrilcril\Impersonate\Events\OrphanedImpersonationLeft;
 use Thecyrilcril\Impersonate\Events\TakenImpersonation;
 
 final class Impersonate
@@ -25,7 +26,12 @@ final class Impersonate
      * Begin impersonating the target user.
      *
      * Returns false when already impersonating (nested impersonation is not
-     * allowed) or when the impersonator would be impersonating themselves.
+     * allowed) or when the impersonator would be impersonating themselves —
+     * including the same user resolved through a different guard.
+     *
+     * The swap is quiet: no Login/Logout events fire (so the target's login
+     * history and login notifications stay clean), remember tokens are never
+     * touched, and the session ID is regenerated against fixation.
      */
     public function take(Authenticatable $impersonator, Authenticatable $target, ?string $guard = null): bool
     {
@@ -36,16 +42,17 @@ final class Impersonate
         $guard ??= $this->defaultGuard();
         $originalGuard = $this->currentGuard($impersonator);
 
-        if ($this->isSameUser($impersonator, $originalGuard, $target, $guard)) {
+        if ($this->isSameUser($impersonator, $target)) {
             return false;
         }
 
         $this->session()->put($this->key('impersonator_id'), $impersonator->getAuthIdentifier());
         $this->session()->put($this->key('impersonator_guard'), $originalGuard);
         $this->session()->put($this->key('guard'), $guard);
+        $this->session()->put($this->key('started_at'), time());
 
-        $this->logoutWithoutCyclingToken($originalGuard);
-        $this->auth->guard($guard)->login($target, false);
+        $this->quietLogout($originalGuard);
+        $this->quietLogin($guard, $target);
 
         $this->events()->dispatch(new TakenImpersonation($impersonator, $target));
 
@@ -55,7 +62,10 @@ final class Impersonate
     /**
      * Stop impersonating and restore the original impersonator in their guard.
      *
-     * Returns false when no impersonation session is active.
+     * Returns false when no impersonation session is active. When the
+     * impersonator no longer exists, the session is cleaned up and an
+     * OrphanedImpersonationLeft event is dispatched so the leave remains
+     * auditable.
      */
     public function leave(): bool
     {
@@ -65,20 +75,25 @@ final class Impersonate
 
         $impersonatorGuard = $this->impersonatorGuard();
         $impersonateGuard = $this->impersonateGuard();
+        $impersonatorId = $this->getImpersonatorId();
 
         $target = $this->auth->guard($impersonateGuard)->user();
         $impersonator = $this->getImpersonator();
 
-        $this->logoutWithoutCyclingToken($impersonateGuard);
+        $this->quietLogout($impersonateGuard);
 
         if ($impersonator !== null) {
-            $this->auth->guard($impersonatorGuard)->login($impersonator, false);
+            $this->quietLogin($impersonatorGuard, $impersonator);
+        } else {
+            $this->session()->migrate(true);
         }
 
         $this->clear();
 
         if ($impersonator !== null && $target !== null) {
             $this->events()->dispatch(new LeftImpersonation($impersonator, $target));
+        } elseif ($impersonatorId !== null) {
+            $this->events()->dispatch(new OrphanedImpersonationLeft($impersonatorId, $target));
         }
 
         return true;
@@ -111,15 +126,104 @@ final class Impersonate
     }
 
     /**
-     * Log out of the given guard without cycling the user's remember token.
-     *
-     * Impersonation must never mutate remember tokens, so we use
-     * logoutCurrentDevice() when available (it clears the session but leaves
-     * the token intact) and fall back to logout() for non-session guards.
+     * The guard the impersonated user is authenticated on, or null when the
+     * session is not impersonating.
      */
-    private function logoutWithoutCyclingToken(string $guard): void
+    public function impersonatingOnGuard(): ?string
+    {
+        return $this->isImpersonating() ? $this->impersonateGuard() : null;
+    }
+
+    /**
+     * Unix timestamp of when the impersonation started, or null when the
+     * session is not impersonating (or predates TTL support).
+     */
+    public function startedAt(): ?int
+    {
+        /** @var int|null $startedAt */
+        $startedAt = $this->session()->get($this->key('started_at'));
+
+        return $startedAt;
+    }
+
+    /**
+     * Whether the active impersonation has outlived the configured TTL.
+     * Sessions without a started_at stamp never expire (backward compat),
+     * and a TTL of zero/null disables expiry entirely.
+     */
+    public function hasExpired(): bool
+    {
+        if (! $this->isImpersonating()) {
+            return false;
+        }
+
+        $ttlMinutes = (int) $this->config->get('impersonate.ttl', 0);
+        $startedAt = $this->startedAt();
+
+        if ($ttlMinutes <= 0 || $startedAt === null) {
+            return false;
+        }
+
+        return (time() - $startedAt) >= ($ttlMinutes * 60);
+    }
+
+    /**
+     * Whole minutes until the active impersonation expires; null when no
+     * impersonation is active or expiry is disabled.
+     */
+    public function minutesRemaining(): ?int
+    {
+        $ttlMinutes = (int) $this->config->get('impersonate.ttl', 0);
+        $startedAt = $this->startedAt();
+
+        if (! $this->isImpersonating() || $ttlMinutes <= 0 || $startedAt === null) {
+            return null;
+        }
+
+        $remaining = ($startedAt + $ttlMinutes * 60) - time();
+
+        return max(0, (int) ceil($remaining / 60));
+    }
+
+    /**
+     * Log the user into the guard without firing Login events, touching the
+     * remember token, or leaving the session ID intact (fixation defense).
+     */
+    private function quietLogin(string $guard, Authenticatable $user): void
     {
         $driver = $this->auth->guard($guard);
+
+        if (method_exists($driver, 'getName')) {
+            $driver->setUser($user);
+            $this->session()->put($driver->getName(), $user->getAuthIdentifier());
+            $this->session()->migrate(true);
+
+            return;
+        }
+
+        // Non-session guards fall back to a plain login without remember-me.
+        if (method_exists($driver, 'login')) {
+            $driver->login($user, false);
+        }
+    }
+
+    /**
+     * Log out of the guard without firing Logout events or cycling the
+     * user's remember token.
+     */
+    private function quietLogout(string $guard): void
+    {
+        $driver = $this->auth->guard($guard);
+
+        if (method_exists($driver, 'getName')) {
+            $this->session()->forget($driver->getName());
+
+            if (method_exists($driver, 'forgetUser')) {
+                $driver->forgetUser();
+            }
+
+            return;
+        }
 
         if (method_exists($driver, 'logoutCurrentDevice')) {
             $driver->logoutCurrentDevice();
@@ -127,7 +231,9 @@ final class Impersonate
             return;
         }
 
-        $driver->logout();
+        if (method_exists($driver, 'logout')) {
+            $driver->logout();
+        }
     }
 
     private function session(): Session
@@ -151,11 +257,16 @@ final class Impersonate
         $this->session()->forget($this->key('impersonator_id'));
         $this->session()->forget($this->key('impersonator_guard'));
         $this->session()->forget($this->key('guard'));
+        $this->session()->forget($this->key('started_at'));
     }
 
-    private function isSameUser(Authenticatable $impersonator, string $impersonatorGuard, Authenticatable $target, string $targetGuard): bool
+    /**
+     * Same human regardless of guard: identical identifier on the same
+     * Authenticatable class is self-impersonation even across guards.
+     */
+    private function isSameUser(Authenticatable $impersonator, Authenticatable $target): bool
     {
-        return $impersonatorGuard === $targetGuard
+        return $impersonator::class === $target::class
             && $impersonator->getAuthIdentifier() === $target->getAuthIdentifier();
     }
 

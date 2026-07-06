@@ -64,14 +64,16 @@ it('switches guards when taking and restores the original guard on leave', funct
         ->and(Auth::guard('web')->check())->toBeFalse();
 });
 
-it('allows impersonating the same id across different guards', function (): void {
+it('refuses to impersonate the same user even across different guards', function (): void {
     $admin = $this->makeUser();
 
     Auth::guard('admin')->login($admin);
     $manager = app(Impersonate::class);
 
-    // Same identifier but a different target guard is not self-impersonation.
-    expect($manager->take($admin, $admin, 'web'))->toBeTrue();
+    // Same model class + identifier is the same human — self-impersonation
+    // regardless of which guard resolves them.
+    expect($manager->take($admin, $admin, 'web'))->toBeFalse()
+        ->and($manager->isImpersonating())->toBeFalse();
 });
 
 it('returns false when leaving without an active impersonation', function (): void {
