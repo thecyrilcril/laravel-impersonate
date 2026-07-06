@@ -41,6 +41,34 @@ it('dispatches LeftImpersonation with the correct payload', function (): void {
     });
 });
 
+it('stamps events with the time the impersonation occurred', function (): void {
+    Event::fake([TakenImpersonation::class]);
+
+    $admin = $this->makeUser();
+    $target = $this->makeUser();
+    Auth::guard('web')->login($admin);
+
+    $before = new DateTimeImmutable;
+    app(Impersonate::class)->take($admin, $target);
+    $after = new DateTimeImmutable;
+
+    Event::assertDispatched(TakenImpersonation::class, function (TakenImpersonation $event) use ($before, $after): bool {
+        return $event->occurredAt instanceof DateTimeInterface
+            && $event->occurredAt >= $before
+            && $event->occurredAt <= $after;
+    });
+});
+
+it('accepts an explicit occurredAt on construction', function (): void {
+    $admin = $this->makeUser();
+    $target = $this->makeUser();
+    $moment = new DateTimeImmutable('2026-01-01 12:00:00');
+
+    $event = new LeftImpersonation($admin, $target, $moment);
+
+    expect($event->occurredAt)->toBe($moment);
+});
+
 it('does not dispatch events on rejected attempts', function (): void {
     Event::fake([TakenImpersonation::class]);
 
