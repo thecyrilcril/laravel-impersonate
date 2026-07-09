@@ -7,6 +7,9 @@ namespace Thecyrilcril\Impersonate;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Auth\Factory as AuthFactory;
 use Illuminate\Contracts\Auth\StatefulGuard;
+use Illuminate\Contracts\Cache\Factory as CacheFactory;
+use Illuminate\Contracts\Cache\Lock;
+use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Config\Repository as Config;
 use Illuminate\Contracts\Container\Container;
 use Illuminate\Contracts\Events\Dispatcher;
@@ -35,6 +38,11 @@ final class Impersonate
      * touched, and the session ID is regenerated against fixation.
      */
     public function take(Authenticatable $impersonator, Authenticatable $target, ?string $guard = null): bool
+    {
+        return $this->atomically(fn (): bool => $this->doTake($impersonator, $target, $guard));
+    }
+
+    private function doTake(Authenticatable $impersonator, Authenticatable $target, ?string $guard): bool
     {
         if ($this->isImpersonating()) {
             return false;
@@ -67,6 +75,16 @@ final class Impersonate
         $this->session()->put($this->key('guard'), $guard);
         $this->session()->put($this->key('started_at'), time());
 
+        // Capture a stable fingerprint (opt-in via getImpersonationFingerprint)
+        // so a later leave() can reject a recycled id that resolves to a
+        // different human than the one captured here — an id + class match
+        // alone cannot tell them apart.
+        $fingerprint = $this->fingerprintOf($impersonator);
+
+        if ($fingerprint !== null) {
+            $this->session()->put($this->key('impersonator_fingerprint'), $fingerprint);
+        }
+
         $this->quietLogout($originalGuard);
         $this->quietLogin($guard, $target);
 
@@ -84,6 +102,11 @@ final class Impersonate
      * auditable.
      */
     public function leave(): bool
+    {
+        return $this->atomically(fn (): bool => $this->doLeave());
+    }
+
+    private function doLeave(): bool
     {
         if (! $this->isImpersonating()) {
             return false;
@@ -166,6 +189,17 @@ final class Impersonate
             return null;
         }
 
+        // Stronger guard when the model opts into a fingerprint: an id + class
+        // match still passes if the row was deleted and its id reassigned to a
+        // new same-class user. A stable fingerprint (e.g. a uuid) captured at
+        // take-time catches that — a mismatch means a different human.
+        /** @var string|null $fingerprint */
+        $fingerprint = $this->session()->get($this->key('impersonator_fingerprint'));
+
+        if ($fingerprint !== null && $this->fingerprintOf($impersonator) !== $fingerprint) {
+            return null;
+        }
+
         return $impersonator;
     }
 
@@ -176,6 +210,21 @@ final class Impersonate
     public function impersonatingOnGuard(): ?string
     {
         return $this->isImpersonating() ? $this->impersonateGuard() : null;
+    }
+
+    /**
+     * The guard the operator will be restored onto when the impersonation is
+     * left, or null when not impersonating.
+     *
+     * Consumers whose impersonator lives on a NON-default guard must redirect
+     * after leave() to a route guarded by THIS guard — redirecting to a
+     * default-guard route would bounce the just-restored operator to login.
+     * Single-guard apps can ignore this; it always returns the default guard
+     * for them.
+     */
+    public function restoreGuard(): ?string
+    {
+        return $this->isImpersonating() ? $this->impersonatorGuard() : null;
     }
 
     /**
@@ -209,6 +258,21 @@ final class Impersonate
         }
 
         return (time() - $startedAt) >= ($ttlMinutes * 60);
+    }
+
+    /**
+     * Whether an impersonation is both present AND still within its TTL.
+     *
+     * Prefer this over isImpersonating() for any liveness/authorization
+     * decision: isImpersonating() only reports that session keys exist, so an
+     * expired-but-not-yet-torn-down session still reads as impersonating. A
+     * session is torn down lazily (on the next request through
+     * HandleImpersonationSession), so between expiry and that request it is
+     * "impersonating" but no longer active.
+     */
+    public function isActive(): bool
+    {
+        return $this->isImpersonating() && ! $this->hasExpired();
     }
 
     /**
@@ -303,6 +367,7 @@ final class Impersonate
         $this->session()->forget($this->key('impersonator_guard'));
         $this->session()->forget($this->key('guard'));
         $this->session()->forget($this->key('started_at'));
+        $this->session()->forget($this->key('impersonator_fingerprint'));
     }
 
     /**
@@ -380,6 +445,73 @@ final class Impersonate
             ?? $this->config->get('auth.defaults.guard');
 
         return $guard ?? 'web';
+    }
+
+    /**
+     * Serialize a take/leave against the current session so two concurrent
+     * requests (e.g. two browser tabs) cannot interleave their session writes
+     * — a take racing a leave on the same session otherwise strands or
+     * mis-targets the swap under last-writer-wins.
+     *
+     * Best-effort: when the cache store provides atomic locks the section is
+     * mutually exclusive per session; when it does not (or a competing holder
+     * blocks), the operation still runs — the caller's own isImpersonating()
+     * re-check inside the section remains the correctness backstop.
+     *
+     * @param  callable(): bool  $callback
+     */
+    private function atomically(callable $callback): bool
+    {
+        $lock = $this->lock();
+
+        // No lock provider: degrade to a best-effort, unlocked run. The
+        // callback's own isImpersonating() re-check stays the correctness
+        // backstop.
+        if ($lock === null) {
+            return $callback();
+        }
+
+        // A held lock means another take/leave is mid-swap on this session;
+        // refuse rather than race it under last-writer-wins.
+        if (! $lock->get()) {
+            return false;
+        }
+
+        try {
+            return $callback();
+        } finally {
+            $lock->release();
+        }
+    }
+
+    /**
+     * A per-session atomic lock, or null when the cache store cannot provide
+     * one (e.g. the null store) — the caller then degrades to an unlocked run.
+     */
+    private function lock(): ?Lock
+    {
+        $store = $this->container->make(CacheFactory::class)->store()->getStore();
+
+        return $store instanceof LockProvider
+            ? $store->lock('impersonate:'.$this->session()->getId(), 10)
+            : null;
+    }
+
+    /**
+     * A stable identity fingerprint for the impersonator, or null when the
+     * model does not opt in. A model exposes one by implementing
+     * getImpersonationFingerprint(): string — typically a uuid or another
+     * value that does NOT change when an auto-increment id is recycled.
+     */
+    private function fingerprintOf(Authenticatable $user): ?string
+    {
+        if (! method_exists($user, 'getImpersonationFingerprint')) {
+            return null;
+        }
+
+        $fingerprint = $user->getImpersonationFingerprint();
+
+        return is_string($fingerprint) && $fingerprint !== '' ? $fingerprint : null;
     }
 
     private function key(string $suffix): string

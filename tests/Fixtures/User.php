@@ -15,6 +15,7 @@ use Thecyrilcril\Impersonate\Concerns\ImpersonatesUsers;
  * @property bool $may_impersonate
  * @property bool $protected
  * @property string $remember_token
+ * @property string|null $fingerprint
  */
 final class User extends Authenticatable implements AuthenticatableContract
 {
@@ -30,6 +31,7 @@ final class User extends Authenticatable implements AuthenticatableContract
         'may_impersonate',
         'protected',
         'remember_token',
+        'fingerprint',
     ];
 
     /**
@@ -48,5 +50,14 @@ final class User extends Authenticatable implements AuthenticatableContract
     public function canBeImpersonated(): bool
     {
         return ! $this->protected;
+    }
+
+    /**
+     * Opt into the recycled-id fingerprint guard with a stable per-row value
+     * that does not change when an auto-increment id is reused.
+     */
+    public function getImpersonationFingerprint(): string
+    {
+        return (string) $this->fingerprint;
     }
 }

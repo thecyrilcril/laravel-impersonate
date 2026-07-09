@@ -9,9 +9,16 @@ return [
     | Session Key Prefix
     |--------------------------------------------------------------------------
     |
-    | All impersonation state is stored in the session under keys namespaced
-    | with this prefix (e.g. "impersonate.impersonator_id"). Change it only
-    | if it collides with existing session keys in your application.
+    | The package's INTERNAL impersonation state is stored under keys namespaced
+    | with this prefix (e.g. "impersonate.impersonator_id"). Change it only if
+    | it collides with existing session keys in your application.
+    |
+    | Note: the "impersonate.status" flash key written on auto-teardown (see
+    | HandleImpersonationSession) is a FIXED public contract and is NOT scoped
+    | by this prefix — your status listener reads "impersonate.status" verbatim.
+    | Do not store your own unrelated session data under this prefix's root; a
+    | future suffix collision (or a prefix change) would entangle it with the
+    | package's own keys.
     |
     */
 

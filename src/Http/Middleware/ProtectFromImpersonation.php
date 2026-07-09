@@ -10,10 +10,15 @@ use Symfony\Component\HttpFoundation\Response;
 use Thecyrilcril\Impersonate\Impersonate;
 
 /**
- * Blocks a request while the session is impersonating another user.
+ * Blocks a request while the session is actively impersonating another user.
  *
  * Apply to sensitive routes (password change, two-factor management, account
  * deletion) so an impersonator cannot perform them on the target's behalf.
+ *
+ * Keys on isActive(), not isImpersonating(): an expired-but-not-yet-torn-down
+ * session must not keep blocking the operator's own sensitive routes. Expiry
+ * teardown itself is owned by HandleImpersonationSession; this middleware only
+ * decides whether an *active* impersonation should block the route.
  */
 final class ProtectFromImpersonation
 {
@@ -21,7 +26,7 @@ final class ProtectFromImpersonation
 
     public function handle(Request $request, Closure $next): Response
     {
-        if ($this->impersonate->isImpersonating()) {
+        if ($this->impersonate->isActive()) {
             abort(403, 'This action is not available while impersonating a user.');
         }
 
