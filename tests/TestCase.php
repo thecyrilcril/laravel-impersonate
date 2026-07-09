@@ -23,6 +23,7 @@ abstract class TestCase extends Orchestra
             $table->string('password')->nullable();
             $table->boolean('may_impersonate')->default(true);
             $table->boolean('protected')->default(false);
+            $table->string('fingerprint')->nullable();
             $table->rememberToken();
             $table->timestamps();
         });

@@ -9,8 +9,10 @@ use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Event;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 use Thecyrilcril\Impersonate\Events\OrphanedImpersonationLeft;
 use Thecyrilcril\Impersonate\Http\Middleware\HandleImpersonationSession;
+use Thecyrilcril\Impersonate\Http\Middleware\ProtectFromImpersonation;
 use Thecyrilcril\Impersonate\Impersonate;
 use Thecyrilcril\Impersonate\ImpersonateServiceProvider;
 
@@ -269,5 +271,141 @@ it('returns null accessors when not impersonating', function (): void {
 
     expect($manager->impersonatedUser())->toBeNull()
         ->and($manager->impersonatingOnGuard())->toBeNull()
-        ->and($manager->startedAt())->toBeNull();
+        ->and($manager->startedAt())->toBeNull()
+        ->and($manager->restoreGuard())->toBeNull();
+});
+
+it('reports isActive() true within the ttl and false once expired', function (): void {
+    config()->set('impersonate.ttl', 30);
+
+    $admin = $this->makeUser();
+    $target = $this->makeUser();
+    Auth::guard('web')->login($admin);
+
+    $manager = app(Impersonate::class);
+    $manager->take($admin, $target);
+
+    // Present and within TTL -> active.
+    expect($manager->isActive())->toBeTrue();
+
+    // Past the TTL boundary but not yet torn down: still "impersonating" by
+    // key presence, but no longer active.
+    session()->put('impersonate.started_at', time() - 31 * 60);
+
+    expect($manager->isImpersonating())->toBeTrue()
+        ->and($manager->hasExpired())->toBeTrue()
+        ->and($manager->isActive())->toBeFalse();
+});
+
+it('does not block a protected route once the impersonation has expired', function (): void {
+    config()->set('impersonate.ttl', 30);
+
+    $admin = $this->makeUser();
+    $target = $this->makeUser();
+    Auth::guard('web')->login($admin);
+
+    $manager = app(Impersonate::class);
+    $manager->take($admin, $target);
+
+    $middleware = app(ProtectFromImpersonation::class);
+
+    // Active impersonation blocks the sensitive route.
+    expect(fn () => $middleware->handle(
+        Request::create('/settings'),
+        static fn (): Response => new Response('ok'),
+    ))->toThrow(HttpException::class);
+
+    // Once expired, the operator must not stay locked out of their own route.
+    session()->put('impersonate.started_at', time() - 31 * 60);
+
+    $passed = $middleware->handle(
+        Request::create('/settings'),
+        static fn (): Response => new Response('ok'),
+    );
+
+    expect($passed->getContent())->toBe('ok');
+});
+
+it('refuses a concurrent take while another take/leave holds the session lock', function (): void {
+    $this->app['config']->set('cache.default', 'array');
+
+    $admin = $this->makeUser();
+    $target = $this->makeUser();
+    $other = $this->makeUser();
+    Auth::guard('web')->login($admin);
+
+    // Hold the per-session lock the way a concurrent request would.
+    $lock = cache()->store()->getStore()->lock('impersonate:'.session()->getId(), 10);
+    expect($lock->get())->toBeTrue();
+
+    try {
+        // The contended take must refuse rather than race the held lock.
+        expect(app(Impersonate::class)->take($admin, $target))->toBeFalse()
+            ->and(app(Impersonate::class)->isImpersonating())->toBeFalse();
+    } finally {
+        $lock->release();
+    }
+
+    // With the lock free again, the swap proceeds normally.
+    expect(app(Impersonate::class)->take($admin, $other))->toBeTrue();
+});
+
+it('still takes and leaves when the cache store provides no atomic lock', function (): void {
+    // The null store is not a LockProvider, so the manager degrades to an
+    // unlocked, best-effort swap rather than failing.
+    $this->app['config']->set('cache.default', 'null');
+
+    $admin = $this->makeUser();
+    $target = $this->makeUser();
+    Auth::guard('web')->login($admin);
+
+    $manager = app(Impersonate::class);
+
+    expect($manager->take($admin, $target))->toBeTrue()
+        ->and($manager->isImpersonating())->toBeTrue()
+        ->and($manager->leave())->toBeTrue()
+        ->and($manager->isImpersonating())->toBeFalse();
+});
+
+it('rejects a recycled id whose fingerprint no longer matches on leave', function (): void {
+    $admin = $this->makeUser(['fingerprint' => 'stable-operator-uuid']);
+    $target = $this->makeUser();
+    Auth::guard('web')->login($admin);
+
+    $manager = app(Impersonate::class);
+    $manager->take($admin, $target);
+
+    // Same id, same class, but the row behind the id is now a different human
+    // (its stable fingerprint changed) — the recycled id must be rejected even
+    // though the class check would pass.
+    $admin->update(['fingerprint' => 'a-different-human']);
+
+    expect($manager->getImpersonator())->toBeNull();
+
+    Event::fake([OrphanedImpersonationLeft::class]);
+    expect($manager->leave())->toBeTrue()
+        ->and($manager->isImpersonating())->toBeFalse();
+    Event::assertDispatched(OrphanedImpersonationLeft::class);
+});
+
+it('exposes the restore guard for a cross-guard impersonation', function (): void {
+    $admin = $this->makeUser();
+    $target = $this->makeUser();
+
+    // Operator is authenticated on the non-default admin guard; impersonation
+    // runs on web. leave() must restore onto the admin guard, and restoreGuard()
+    // exposes that so a consumer redirects to an admin-guarded route.
+    Auth::guard('admin')->login($admin);
+
+    $manager = app(Impersonate::class);
+    $manager->take($admin, $target, 'web');
+
+    expect($manager->restoreGuard())->toBe('admin')
+        ->and($manager->impersonatingOnGuard())->toBe('web');
+
+    $manager->leave();
+
+    // The operator is restored on their original admin guard, not the default.
+    expect(Auth::guard('admin')->user()?->getAuthIdentifier())->toBe($admin->id)
+        ->and($manager->isImpersonating())->toBeFalse();
 });
