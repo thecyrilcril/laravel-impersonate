@@ -90,7 +90,7 @@ final class ImpersonateServiceProvider extends ServiceProvider
     /**
      * Backing check for the @canBeImpersonated directive.
      */
-    public static function canBeImpersonated(Authenticatable $user, ?string $guard = null): bool
+    public static function canBeImpersonated(Authenticatable $user): bool
     {
         return method_exists($user, 'canBeImpersonated')
             && $user->canBeImpersonated();
