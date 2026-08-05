@@ -13,6 +13,12 @@ final class TakenImpersonation
 {
     use SerializesModels;
 
+    /**
+     * Both users are typed as the guard-agnostic Authenticatable contract; in
+     * practice they are usually your Eloquent User model. Consumers that need
+     * a concrete Model (e.g. activitylog's causedBy()/performedOn()) must
+     * narrow with instanceof first.
+     */
     public function __construct(
         public Authenticatable $impersonator,
         public Authenticatable $target,
