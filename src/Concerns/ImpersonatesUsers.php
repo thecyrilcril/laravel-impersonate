@@ -67,6 +67,25 @@ trait ImpersonatesUsers
     }
 
     /**
+     * Determine whether this user is the impersonator of the active
+     * impersonation.
+     *
+     * Note: during impersonation the authenticated user IS the target, so
+     * auth()->user()->isImpersonator() is false. Call this on a model you
+     * hold directly (e.g. from the manager's getImpersonator(), or in a
+     * policy). To ask "is this session impersonating at all", use the
+     * manager's isImpersonating() instead.
+     */
+    public function isImpersonator(): bool
+    {
+        $manager = app(Impersonate::class);
+
+        return $manager->isImpersonating()
+            && $manager->getImpersonatorType() === $this::class
+            && $manager->getImpersonatorId() === $this->getAuthIdentifier();
+    }
+
+    /**
      * Whether this user is allowed to impersonate others.
      *
      * Override in your model to enforce your own authorization policy.

@@ -87,6 +87,24 @@ it('reports no impersonator id when not impersonating', function (): void {
         ->and($manager->getImpersonator())->toBeNull();
 });
 
+it('exposes the impersonator class through getImpersonatorType', function (): void {
+    $admin = $this->makeUser();
+    $target = $this->makeUser();
+
+    Auth::guard('web')->login($admin);
+    $manager = app(Impersonate::class);
+
+    expect($manager->getImpersonatorType())->toBeNull();
+
+    $manager->take($admin, $target);
+
+    expect($manager->getImpersonatorType())->toBe($admin::class);
+
+    $manager->leave();
+
+    expect($manager->getImpersonatorType())->toBeNull();
+});
+
 it('clears all session keys after leaving', function (): void {
     $admin = $this->makeUser();
     $target = $this->makeUser();

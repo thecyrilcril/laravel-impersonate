@@ -72,12 +72,47 @@ it('reports the target as impersonated when their id collides with the impersona
         ->and($target->isImpersonated())->toBeTrue();
 });
 
+it('identifies the active impersonator through isImpersonator', function (): void {
+    $admin = $this->makeUser(['may_impersonate' => true]);
+    $target = $this->makeUser();
+    $bystander = $this->makeUser();
+
+    Auth::guard('web')->login($admin);
+    $admin->impersonate($target);
+
+    expect($admin->isImpersonator())->toBeTrue()
+        ->and($target->isImpersonator())->toBeFalse()
+        ->and($bystander->isImpersonator())->toBeFalse();
+});
+
+it('reports isImpersonator false when no impersonation is active', function (): void {
+    $admin = $this->makeUser();
+
+    Auth::guard('web')->login($admin);
+
+    expect($admin->isImpersonator())->toBeFalse();
+});
+
 it('reports isImpersonated false when no impersonation is active', function (): void {
     $user = $this->makeUser();
 
     Auth::guard('web')->login($user);
 
     expect($user->isImpersonated())->toBeFalse();
+});
+
+it('does not mistake a same-id user of another class for the impersonator', function (): void {
+    $admin = $this->makeAdmin();
+    $decoy = $this->makeUser();
+    $target = $this->makeUser();
+
+    expect($admin->id)->toBe($decoy->id);
+
+    Auth::guard('staff')->login($admin);
+    $admin->impersonate($target, 'web');
+
+    expect($admin->isImpersonator())->toBeTrue()
+        ->and($decoy->isImpersonator())->toBeFalse();
 });
 
 it('defaults canImpersonate and canBeImpersonated to true', function (): void {

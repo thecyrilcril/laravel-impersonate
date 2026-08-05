@@ -165,6 +165,20 @@ final class Impersonate
         return $id;
     }
 
+    /**
+     * The impersonator's Authenticatable class as captured at take-time, or
+     * null when the session is not impersonating.
+     *
+     * @return class-string|null
+     */
+    public function getImpersonatorType(): ?string
+    {
+        /** @var class-string|null $type */
+        $type = $this->session()->get($this->key('impersonator_type'));
+
+        return $type;
+    }
+
     public function getImpersonator(): ?Authenticatable
     {
         $id = $this->getImpersonatorId();
@@ -182,8 +196,7 @@ final class Impersonate
 
         // Guard against a recycled id resolving to a different account: the
         // restored model must match the class captured at take-time.
-        /** @var string|null $type */
-        $type = $this->session()->get($this->key('impersonator_type'));
+        $type = $this->getImpersonatorType();
 
         if ($type !== null && $impersonator::class !== $type) {
             return null;
