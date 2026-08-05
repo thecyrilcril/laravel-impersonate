@@ -46,13 +46,43 @@ trait ImpersonatesUsers
 
     /**
      * Determine whether the current session is impersonating this user.
+     *
+     * True only for the user actually being impersonated — matched by class
+     * AND identifier, so an id shared with a different Authenticatable class
+     * neither hides the real target nor flags a bystander.
      */
     public function isImpersonated(): bool
     {
         $manager = app(Impersonate::class);
 
+        if (! $manager->isImpersonating()) {
+            return false;
+        }
+
+        $impersonated = $manager->impersonatedUser();
+
+        return $impersonated !== null
+            && $impersonated::class === $this::class
+            && $impersonated->getAuthIdentifier() === $this->getAuthIdentifier();
+    }
+
+    /**
+     * Determine whether this user is the impersonator of the active
+     * impersonation.
+     *
+     * Note: during impersonation the authenticated user IS the target, so
+     * auth()->user()->isImpersonator() is false. Call this on a model you
+     * hold directly (e.g. from the manager's getImpersonator(), or in a
+     * policy). To ask "is this session impersonating at all", use the
+     * manager's isImpersonating() instead.
+     */
+    public function isImpersonator(): bool
+    {
+        $manager = app(Impersonate::class);
+
         return $manager->isImpersonating()
-            && $manager->getImpersonatorId() !== $this->getAuthIdentifier();
+            && $manager->getImpersonatorType() === $this::class
+            && $manager->getImpersonatorId() === $this->getAuthIdentifier();
     }
 
     /**

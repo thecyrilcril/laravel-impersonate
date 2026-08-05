@@ -8,6 +8,7 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
 use Orchestra\Testbench\TestCase as Orchestra;
 use Thecyrilcril\Impersonate\ImpersonateServiceProvider;
+use Thecyrilcril\Impersonate\Tests\Fixtures\Admin;
 use Thecyrilcril\Impersonate\Tests\Fixtures\User;
 
 abstract class TestCase extends Orchestra
@@ -24,6 +25,17 @@ abstract class TestCase extends Orchestra
             $table->boolean('may_impersonate')->default(true);
             $table->boolean('protected')->default(false);
             $table->string('fingerprint')->nullable();
+            $table->rememberToken();
+            $table->timestamps();
+        });
+
+        // A second Authenticatable class whose ids start at 1 like users',
+        // so cross-class id collisions can be exercised.
+        Schema::create('admins', static function (Blueprint $table): void {
+            $table->increments('id');
+            $table->string('name');
+            $table->string('email')->unique();
+            $table->string('password')->nullable();
             $table->rememberToken();
             $table->timestamps();
         });
@@ -58,6 +70,26 @@ abstract class TestCase extends Orchestra
             'driver' => 'session',
             'provider' => 'users',
         ]);
+
+        // A guard backed by a DIFFERENT Authenticatable class, used to
+        // exercise cross-class impersonation and id collisions.
+        $config->set('auth.providers.admins', [
+            'driver' => 'eloquent',
+            'model' => Admin::class,
+        ]);
+        $config->set('auth.guards.staff', [
+            'driver' => 'session',
+            'provider' => 'admins',
+        ]);
+    }
+
+    protected function makeAdmin(array $attributes = []): Admin
+    {
+        return Admin::query()->create(array_merge([
+            'name' => 'Admin '.uniqid(),
+            'email' => uniqid().'@example.com',
+            'password' => bcrypt('password'),
+        ], $attributes));
     }
 
     protected function makeUser(array $attributes = []): User

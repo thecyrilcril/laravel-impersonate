@@ -18,6 +18,11 @@ final class OrphanedImpersonationLeft
 {
     use SerializesModels;
 
+    /**
+     * The target is typed as the guard-agnostic Authenticatable contract; in
+     * practice it is usually your Eloquent User model. Consumers that need a
+     * concrete Model must narrow with instanceof first.
+     */
     public function __construct(
         public int|string $impersonatorId,
         public ?Authenticatable $target = null,

@@ -66,9 +66,25 @@ The trait adds:
 | --- | --- |
 | `impersonate(Authenticatable $target, ?string $guard = null): bool` | Start impersonating `$target`. Returns `false` when not allowed, already impersonating, or the target is you. |
 | `leaveImpersonation(): bool` | Stop impersonating and return to your own session. |
-| `isImpersonated(): bool` | True while the signed-in user is being impersonated. Call it on the current user. |
+| `isImpersonated(): bool` | Is **this user** the one currently being impersonated? True for the target only — matched by class and id. |
+| `isImpersonator(): bool` | Is **this user** the impersonator of the active impersonation? True for the admin only. |
 | `canImpersonate(): bool` | May this user impersonate others? Defaults to `true` — override it. |
 | `canBeImpersonated(): bool` | May others impersonate this user? Defaults to `true` — override it. |
+
+**Mind the direction of the two state checks.** During impersonation the
+signed-in user *is* the target, so `Auth::user()->isImpersonated()` is true
+and `Auth::user()->isImpersonator()` is false. Neither method answers "is this
+session impersonating at all" — that is the manager's `isImpersonating()`. In
+particular, don't try to block impersonation chaining from inside
+`canImpersonate()` with `! $this->isImpersonated()`; that guard never fires
+for the actor starting a new impersonation. Gate chaining on the manager's own
+state instead:
+
+```php
+if (app(\Thecyrilcril\Impersonate\Impersonate::class)->isImpersonating()) {
+    abort(403, 'Cannot impersonate while impersonating.');
+}
+```
 
 Override the two hooks to set your own rules:
 
@@ -83,6 +99,10 @@ public function canBeImpersonated(): bool
     return ! $this->hasRole('super-admin');
 }
 ```
+
+> Don't add `#[\Override]` when overriding these hooks. They come from a
+> trait, not a parent class, so PHP fatals at class-load time with "has
+> #[\Override] attribute, but no matching parent method exists".
 
 > The `Impersonate` manager does **no** permission checks on its own. The
 > trait's `impersonate()` checks `canImpersonate()` and `canBeImpersonated()`
@@ -130,6 +150,7 @@ $manager->leave();                          // restores the admin
 $manager->isImpersonating();                // bool — impersonation keys exist in the session
 $manager->isActive();                       // bool — impersonating AND not expired
 $manager->getImpersonatorId();              // int|string|null — the admin's id
+$manager->getImpersonatorType();            // ?string — the admin's model class, as captured at take()
 $manager->getImpersonator();                // ?Authenticatable — the admin, or null if deleted
 $manager->impersonatedUser();               // ?Authenticatable — the user being impersonated
 $manager->impersonatingOnGuard();           // ?string — the guard the target is logged into
@@ -266,6 +287,32 @@ Event::listen(OrphanedImpersonationLeft::class, function (OrphanedImpersonationL
     ]);
 });
 ```
+
+Two integration notes:
+
+- **The payloads are contracts, not models.** `impersonator` and `target` are
+  typed as `Illuminate\Contracts\Auth\Authenticatable` because the package is
+  guard-agnostic — a custom user provider doesn't have to return Eloquent
+  models. Consumers that require a concrete `Model` (spatie/activitylog's
+  `causedBy()` / `performedOn()`, for example) must narrow first:
+
+  ```php
+  public function handle(TakenImpersonation $event): void
+  {
+      if (! $event->impersonator instanceof User || ! $event->target instanceof User) {
+          return; // or log the unexpected Authenticatable
+      }
+
+      activity()->causedBy($event->impersonator)->performedOn($event->target)
+          ->log('impersonation.taken');
+  }
+  ```
+
+- **Don't register a discovered listener twice.** If your listener lives in
+  `app/Listeners/`, Laravel discovers any public `handle*` method by its typed
+  first parameter automatically — don't also wire it with `Event::listen()`,
+  or every event fires it twice (two audit rows per impersonation). Check
+  with `php artisan event:list`.
 
 ## Guarding against reused ids (fingerprints)
 

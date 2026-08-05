@@ -4,6 +4,33 @@ All notable changes to `laravel-impersonate` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v1.1.0 - 2026-08-05
+
+### Added
+
+- `ImpersonatesUsers::isImpersonator()` — true when this user is the
+  impersonator of the active impersonation (matched by class and id). Note
+  that during impersonation the authenticated user is the *target*, so call
+  it on a model you hold directly, and keep using the manager's
+  `isImpersonating()` for "is this session impersonating at all" checks
+  (e.g. anti-chaining guards).
+- `Impersonate::getImpersonatorType()` — the impersonator's model class as
+  captured at take-time, or null when not impersonating.
+- README: guidance on the direction of `isImpersonated()` /
+  `isImpersonator()`, anti-chaining via the manager, why `#[\Override]`
+  fatals on the trait hooks, narrowing the events' `Authenticatable` payloads
+  for concrete-Model consumers, and avoiding double listener registration
+  with Laravel's event discovery.
+
+### Fixed
+
+- `ImpersonatesUsers::isImpersonated()` now matches the documented behaviour
+  ("is impersonating **this user**") by comparing against the impersonated
+  user's class and id. Previously it returned true for *every* user except
+  the impersonator while an impersonation was active, and false for a target
+  whose id collided with the impersonator's across different Authenticatable
+  classes.
+
 ## v1.0.0 - 2026-07-10
 
 First stable release.
